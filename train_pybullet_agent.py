@@ -87,7 +87,8 @@ class CurriculumCallback(BaseCallback):
                 print(f"\n📊 Curriculum Level {self.current_level}: "
                       f"Success rate {success_rate:.1%} (need {self.success_threshold:.0%})")
             
-            if success_rate >= self.success_threshold and len(recent_successes) >= required:
+            # Only check success rate - the required_successes is for tracking, not blocking
+            if success_rate >= self.success_threshold:
                 if self.current_level < len(CURRICULUM_LEVELS) - 1:
                     self.current_level += 1
                     self.levels_completed.append(self.num_timesteps)

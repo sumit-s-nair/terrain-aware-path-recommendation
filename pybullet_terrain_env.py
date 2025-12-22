@@ -581,9 +581,9 @@ class PyBulletTerrainEnv(gym.Env):
         # by getting closer than ever before - can't farm by oscillating
         # ═══════════════════════════════════════════════════════════════
         if goal_dist < self.best_distance_achieved:
-            # Reward proportional to progress made
+            # INCREASED reward to create dense gradient (was 2.0)
             progress = self.best_distance_achieved - goal_dist
-            reward += progress * 2.0  # 2 points per meter of NEW progress
+            reward += progress * 100.0  # 100 points per meter of NEW progress
             self.best_distance_achieved = goal_dist
         
         # Update heatmap with current position
@@ -591,10 +591,10 @@ class PyBulletTerrainEnv(gym.Env):
             self.trajectory_heatmap[new_row, new_col] += 1
         
         if reached_goal:
-            reward += 10000.0  # Simplified: no stamina bonus
+            reward += 1000.0  # Reduced from 10000 to match progress rewards better
             self.curriculum_successes += 1
         elif self.health <= 0:
-            reward -= 5000.0
+            reward -= 500.0  # Reduced from 5000 to match new reward scale
         # STAMINA DISABLED - no termination on exhaustion
         
         # Check termination (stamina disabled)
@@ -602,7 +602,7 @@ class PyBulletTerrainEnv(gym.Env):
         truncated = self.step_count >= self.max_steps
         
         if truncated and not terminated:
-            reward -= 500.0  # Reduced timeout penalty (was -1000)
+            reward -= 100.0  # Reduced timeout penalty to match new scale
         
         # Build observation
         obs = self._get_observation()
@@ -730,12 +730,18 @@ class PyBulletTerrainEnv(gym.Env):
 
 # Curriculum levels - increase max_steps for uphill walking
 CURRICULUM_LEVELS = [
-    {"goal_distance": 10,    "max_steps": 500,   "required_successes": 20},   # Level 0: 50 steps/m
-    {"goal_distance": 25,    "max_steps": 1000,  "required_successes": 30},   # Level 1: 40 steps/m
-    {"goal_distance": 50,    "max_steps": 1500,  "required_successes": 50},   # Level 2: 30 steps/m
-    {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},  # Level 3: 25 steps/m
-    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 200},  # Level 4: 24 steps/m
-    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 500},  # Level 5: 24 steps/m
+    {"goal_distance": 10,    "max_steps": 500,   "required_successes": 20},   # Level 0: 10m
+    {"goal_distance": 15,    "max_steps": 600,   "required_successes": 25},   # Level 1: 15m
+    {"goal_distance": 20,    "max_steps": 750,   "required_successes": 30},   # Level 2: 20m
+    {"goal_distance": 25,    "max_steps": 900,   "required_successes": 35},   # Level 3: 25m (NEW - prevents stall)
+    {"goal_distance": 30,    "max_steps": 1000,  "required_successes": 40},   # Level 4: 30m
+    {"goal_distance": 40,    "max_steps": 1250,  "required_successes": 50},   # Level 5: 40m (NEW)
+    {"goal_distance": 50,    "max_steps": 1500,  "required_successes": 60},   # Level 6: 50m
+    {"goal_distance": 75,    "max_steps": 2000,  "required_successes": 80},   # Level 7: 75m (NEW)
+    {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},  # Level 8: 100m
+    {"goal_distance": 150,   "max_steps": 4000,  "required_successes": 150},  # Level 9: 150m (NEW)
+    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 200},  # Level 10: 250m
+    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 500},  # Level 11: 500m (full trail)
 ]
 
 

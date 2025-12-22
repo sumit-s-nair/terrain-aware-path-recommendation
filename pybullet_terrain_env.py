@@ -728,20 +728,25 @@ class PyBulletTerrainEnv(gym.Env):
         self.physics_client = None
 
 
-# Curriculum levels - increase max_steps for uphill walking
+# Curriculum levels - full trail is 14.6km with 1397m elevation gain
 CURRICULUM_LEVELS = [
-    {"goal_distance": 10,    "max_steps": 500,   "required_successes": 20},   # Level 0: 10m
-    {"goal_distance": 15,    "max_steps": 600,   "required_successes": 25},   # Level 1: 15m
-    {"goal_distance": 20,    "max_steps": 750,   "required_successes": 30},   # Level 2: 20m
-    {"goal_distance": 25,    "max_steps": 900,   "required_successes": 35},   # Level 3: 25m (NEW - prevents stall)
-    {"goal_distance": 30,    "max_steps": 1000,  "required_successes": 40},   # Level 4: 30m
-    {"goal_distance": 40,    "max_steps": 1250,  "required_successes": 50},   # Level 5: 40m (NEW)
-    {"goal_distance": 50,    "max_steps": 1500,  "required_successes": 60},   # Level 6: 50m
-    {"goal_distance": 75,    "max_steps": 2000,  "required_successes": 80},   # Level 7: 75m (NEW)
-    {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},  # Level 8: 100m
-    {"goal_distance": 150,   "max_steps": 4000,  "required_successes": 150},  # Level 9: 150m (NEW)
-    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 200},  # Level 10: 250m
-    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 500},  # Level 11: 500m (full trail)
+    {"goal_distance": 10,    "max_steps": 500,   "required_successes": 20},    # Level 0: 10m
+    {"goal_distance": 15,    "max_steps": 600,   "required_successes": 25},    # Level 1: 15m
+    {"goal_distance": 20,    "max_steps": 750,   "required_successes": 30},    # Level 2: 20m
+    {"goal_distance": 25,    "max_steps": 900,   "required_successes": 35},    # Level 3: 25m
+    {"goal_distance": 30,    "max_steps": 1000,  "required_successes": 40},    # Level 4: 30m
+    {"goal_distance": 40,    "max_steps": 1250,  "required_successes": 50},    # Level 5: 40m
+    {"goal_distance": 50,    "max_steps": 1500,  "required_successes": 60},    # Level 6: 50m
+    {"goal_distance": 75,    "max_steps": 2000,  "required_successes": 80},    # Level 7: 75m
+    {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},   # Level 8: 100m
+    {"goal_distance": 150,   "max_steps": 4000,  "required_successes": 120},   # Level 9: 150m
+    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 150},   # Level 10: 250m
+    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 200},   # Level 11: 500m
+    {"goal_distance": 1000,  "max_steps": 25000, "required_successes": 300},   # Level 12: 1km
+    {"goal_distance": 2000,  "max_steps": 50000, "required_successes": 400},   # Level 13: 2km
+    {"goal_distance": 5000,  "max_steps": 120000,"required_successes": 500},   # Level 14: 5km
+    {"goal_distance": 10000, "max_steps": 250000,"required_successes": 750},   # Level 15: 10km
+    {"goal_distance": 15000, "max_steps": 400000,"required_successes": 1000},  # Level 16: 14.6km (full trail)
 ]
 
 

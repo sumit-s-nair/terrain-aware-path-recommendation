@@ -14,3 +14,8 @@ geopandas
 py3dep
 pygeohydro
 tensorboard
+pybullet
+sb3-contrib
+pandas
+opencv-python
+tqdm

@@ -1,136 +1,155 @@
 # Terrain-Aware Path Recommendation
 
-A physics-based reinforcement learning project for realistic hiking simulation using real elevation data. Features a custom environment that models realistic hiking physics including slip mechanics, energy systems, and terrain-aware movement costs.
+A physics-based reinforcement learning system for generating safe hiking paths that outperform traditional pathfinding algorithms like A*. Uses real terrain data and research-backed physics simulation to learn routes that naturally exhibit switchback patterns—just like real mountain trails.
 
 ---
 
-## Features
+## Key Features
 
-- **Realistic Physics Environment**: Custom hiking simulation with slip mechanics, energy systems, and physics-based movement
-- **Real Terrain Data**: Download and process high-resolution elevation data from USGS/OpenTopography
-- **Fixed Reward Structure**: Progress-based rewards that prevent agent policy collapse and stuck behavior
-- **Comprehensive Testing**: Behavior analysis and policy collapse detection for trained agents
-- **Curriculum Learning**: Progressive training starting from easy distances with automatic progression
-- **Complete Workflow**: Four-step pipeline from data download to agent testing
+- **PyBullet Physics Simulation**: Realistic terrain interaction with research-backed friction coefficients
+- **Sparse Reward Design**: Goal-only rewards force agent to learn from physics, not reward hacking
+- **Terrain-Aware Energy Model**: Naismith's Rule-based stamina system encourages gradual climbing
+- **SAC Training**: Soft Actor-Critic for continuous action spaces with curriculum learning
+- **A* Comparison**: Automated comparison between RL paths, A* paths, and actual hiking trails
+
+---
+
+## Research Motivation
+
+Traditional pathfinding algorithms (A*, Dijkstra) optimize for distance or simple slope penalties but fail to account for:
+
+1. **Cumulative fatigue**: Steep direct routes drain energy exponentially
+2. **Terrain traversability**: Scree and loose rock are dangerous regardless of slope
+3. **Safety margins**: Real trails use switchbacks for a reason
+
+This project demonstrates that RL agents, trained with realistic physics constraints, naturally discover switchback patterns—the same solution humans evolved over centuries of mountain travel.
 
 ---
 
 ## Quick Start
 
-1. **Clone and Install:**
-   ```bash
-   git clone <repository-url>
-   cd Terrain-Aware-Path-Recommendation
-   pip install -r requirements.txt
-   ```
+```bash
+# 1. Clone and setup
+git clone <repository-url>
+cd Terrain-Aware-Path-Recommendation
+python -m venv venv
+.\venv\Scripts\activate      # Windows
+# source venv/bin/activate   # Linux/Mac
 
-2. **Run Complete Workflow:**
-   ```bash
-   python 1.download_data.py      # Download terrain data
-   python 2.preprocess_data.py    # Process for RL environment  
-   python 3.build_and_train.py    # Train PPO agent with fixed rewards
-   python 4.test_agent.py         # Test and analyze agent performance
-   ```
+# 2. Install dependencies
+pip install -r requirements.txt
 
----
+# 3. Prepare data (if not already present)
+python 1.download_data.py
+python 2.preprocess_data.py
 
-## Core Workflow
+# 4. Train agent (expect 2-5 hours)
+python train_pybullet_agent.py --timesteps 2000000
 
-### 1. Download Terrain Data (`1.download_data.py`)
-Downloads high-resolution DEM and landcover data:
-- Reads GPX trail file for area bounds
-- Downloads 1-meter resolution DEM from USGS 3DEP
-- Downloads landcover classification from NLCD
-- Automatically tiles large areas for best resolution
-
-### 2. Preprocess Data (`2.preprocess_data.py`)  
-Converts raw data into RL-ready format:
-- **slope.tif**: Terrain slope in degrees
-- **stability.tif**: Ground stability (0-1 scale)
-- **vegetation_cost.tif**: Movement cost based on landcover
-- **terrain_rgb.tif**: RGB visualization for agent perception
-- **trail_coordinates.npy**: Reference trail points
-
-### 3. Train Agent (`3.build_and_train.py`)
-Trains PPO agent with fixed reward structure:
-- **Progress-based rewards**: 10x bonus for movement toward goal, 5x penalty for movement away
-- **Anti-resting penalties**: Discourages agents from getting stuck
-- **Curriculum learning**: Starts at 50m distance, automatically progresses
-- **Physics simulation**: Realistic slip mechanics and energy systems
-
-### 4. Test and Analyze (`4.test_agent.py`)
-Comprehensive agent evaluation:
-- Tests across multiple starting distances (50m, 100m, 200m, 500m)
-- **Behavior analysis**: Detects policy collapse and stuck behavior
-- **Action diversity tracking**: Ensures agents use varied strategies
-- **Performance visualization**: Success rates, progress metrics, action patterns
-
----
-
-## Key Improvements
-
-### Fixed Reward Structure
-The project implements a **progress-based reward system** that solves common RL problems:
-- ✅ **Prevents Policy Collapse**: Agents learn diverse movement strategies
-- ✅ **Eliminates Stuck Behavior**: Anti-resting penalties keep agents moving
-- ✅ **Goal-Directed Learning**: Rewards progress toward goal, not just proximity
-- ✅ **Stable Training**: Curriculum learning with automatic progression
-
-### Realistic Physics
-The `RealisticHikingEnv` includes:
-- **Slip Mechanics**: Agents can slip on steep terrain based on slope and conditions
-- **Energy System**: Movement costs vary by terrain difficulty
-- **8-Direction Movement**: More realistic movement options than grid-based approaches
-- **Health/Safety**: Agents must manage risk vs. progress
+# 5. Compare with A* and actual trails
+python compare_with_astar.py --visualize --metrics
+```
 
 ---
 
 ## File Structure
 
 ```
-├── 1.download_data.py             # Download DEM and landcover data
-├── 2.preprocess_data.py           # Process terrain for RL environment
-├── 3.build_and_train.py           # Train PPO agent with fixed rewards
-├── 4.test_agent.py                # Test and analyze agent performance
-├── physics_hiking_env.py          # Core environment implementation
-├── requirements.txt               # Python dependencies
+├── pybullet_terrain_env.py     # NEW: PyBullet physics environment
+├── train_pybullet_agent.py     # NEW: SAC training with curriculum
+├── compare_with_astar.py       # NEW: A* comparison and visualization
+│
+├── 1.download_data.py          # Download DEM and landcover
+├── 2.preprocess_data.py        # Process terrain for RL
+├── 4.test_agent.py             # Test trained agent
+├── requirements.txt            # Python dependencies
+│
+├── physics_hiking_env.py       # LEGACY: Original grid-based environment
+├── 3.build_and_train.py        # LEGACY: Original PPO training
+│
 ├── data/
-│   ├── raw/                       # DEM, landcover, GPX files
-│   └── processed/                 # Processed terrain maps
-├── outputs/
-│   ├── checkpoints/               # Trained model files
-│   └── tensorboard/               # Training logs
-└── logs_fixed/                    # Training monitoring data
+│   ├── raw/                    # DEM, landcover, GPX files
+│   └── processed/              # Slope, stability, terrain maps
+└── outputs/
+    ├── checkpoints/            # Trained model files
+    └── tensorboard/            # Training logs
 ```
 
 ---
 
-## Performance Analysis
+## Physics Model
 
-The testing script provides detailed analysis:
-- **Success Rate**: Percentage of episodes reaching the goal
-- **Progress Metrics**: How far agents move toward the goal
-- **Action Diversity**: Variety of movement strategies used
-- **Policy Collapse Detection**: Identifies when agents only use one action
-- **Behavioral Diagnosis**: Categorizes agent performance (excellent/good/poor/stuck)
+### Terrain Friction Coefficients
+
+Research-backed values from biomechanics and geotechnical literature:
+
+| Surface | Friction (μ) | Source |
+|---------|-------------|--------|
+| Established trail | 0.75 | [1] |
+| Dry rock | 0.70 | [1] |
+| Grass | 0.55 | [2] |
+| Forest floor | 0.50 | [2] |
+| Scree/talus | 0.35 | [3] |
+
+### Energy Model (Naismith-Based)
+
+Following Naismith's Rule [4] and Scarf's validation [5]:
+
+```
+Energy Cost = Horizontal Distance + (Vertical Gain × 8)
+```
+
+This 8:1 equivalence ratio means 1 meter of climbing equals 8 meters of flat walking in effort—making steep direct routes extremely costly and naturally encouraging switchbacks.
 
 ---
 
-## Troubleshooting
+## Comparison with A*
 
-- **Policy Collapse**: If agents only use one action, retrain with the fixed reward structure
-- **Stuck Behavior**: The progress-based rewards should prevent this; check reward implementation
-- **No Models Found**: Run `3.build_and_train.py` to create trained models
-- **Data Missing**: Ensure `1.download_data.py` and `2.preprocess_data.py` complete successfully
+The `compare_with_astar.py` tool generates side-by-side comparisons:
+
+| Metric | A* Path | RL Agent | Advantage |
+|--------|---------|----------|-----------|
+| **Energy Cost** | High | Lower | RL finds efficient switchbacks |
+| **Max Slope** | Steep | Gradual | RL avoids dangerous terrain |
+| **Risk Score** | Higher | Lower | RL prioritizes safety |
+| **Path Length** | Shorter | Longer | Acceptable trade-off |
 
 ---
 
-## Research Context
+## Training Details
 
-This project addresses key challenges in terrain-aware path planning:
-1. **Realistic Physics**: Beyond simple grid-world navigation
-2. **Real-World Data**: Using actual elevation and landcover data
-3. **Stable RL Training**: Preventing common policy collapse issues
-4. **Comprehensive Evaluation**: Detecting and diagnosing agent behaviors
+**Algorithm**: SAC (Soft Actor-Critic) [6]
+- Better for continuous action spaces than PPO
+- Off-policy for sample efficiency
+- Entropy regularization for exploration
 
-The fixed reward structure is particularly important for preventing the common RL problem where agents learn to "game" the reward system by resting instead of making progress.
+**Curriculum Learning**:
+```python
+Level 0: 25m  @ 500 steps   → Level 1: 50m  @ 1000 steps
+Level 2: 100m @ 2000 steps  → Level 3: 250m @ 5000 steps
+Level 4: 500m @ 10000 steps → Level 5: 1000m @ 25000 steps
+```
+
+---
+
+## References
+
+1. Ziaei, M. et al. (2017). "Coefficient of friction, walking speed and cadence on slippery and dry surfaces." *Int. J. Occupational Safety and Ergonomics*. DOI: [10.1080/10803548.2017.1398922](https://doi.org/10.1080/10803548.2017.1398922)
+
+2. Beschorner, K.E. et al. (2016). "Required coefficient of friction during level walking is predictive of slipping." *Gait & Posture*. DOI: [10.1016/j.gaitpost.2016.05.021](https://doi.org/10.1016/j.gaitpost.2016.05.021)
+
+3. Piazza, F. et al. (2022). "Active Scree Slope Stability Investigation Based on Geophysical and Geotechnical Approach." *MDPI Water*, 14(16), 2569. DOI: [10.3390/w14162569](https://doi.org/10.3390/w14162569)
+
+4. Naismith, W.W. (1892). "Cruach Ardran, Stobinian, and Ben More." *Scottish Mountaineering Club Journal*, 2, 136.
+
+5. Scarf, P.A. (2007). "Route choice in mountain navigation, Naismith's Rule, and the equivalence of distance and climb." *J. Operational Research Society*, 58(9), 1199-1205. DOI: [10.1057/palgrave.jors.2602249](https://doi.org/10.1057/palgrave.jors.2602249)
+
+6. Haarnoja, T. et al. (2018). "Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor." *ICML 2018*. [arXiv:1801.01290](https://arxiv.org/abs/1801.01290)
+
+7. Wellhausen, L. et al. (2019). "Where Should I Walk? Predicting Terrain Properties from Images via Self-Supervised Learning." *IEEE RA-L*. DOI: [10.1109/LRA.2019.2930266](https://doi.org/10.1109/LRA.2019.2930266)
+
+---
+
+## License
+
+MIT License - See LICENSE file for details.

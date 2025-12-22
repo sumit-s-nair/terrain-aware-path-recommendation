@@ -1,0 +1,782 @@
+"""
+PyBullet-based Terrain Environment for Hiking Path RL.
+
+Physics-based hiking simulation with research-backed friction coefficients and energy models.
+
+References:
+    [1] Ziaei, M. et al. (2017). "Coefficient of friction, walking speed and cadence on slippery 
+        and dry surfaces." Int. J. Occupational Safety and Ergonomics. DOI: 10.1080/10803548.2017.1398922
+    [2] Scarf, P. A. (2007). "Route choice in mountain navigation, Naismith's Rule, and the 
+        equivalence of distance and climb." J. Operational Research Society, 58(9), 1199-1205.
+    [3] Naismith, W. W. (1892). Scottish Mountaineering Club Journal - Original Naismith's Rule.
+    [4] Piazza et al. (2022). "Active Scree Slope Stability Investigation." MDPI Water, 14(16), 2569.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+from pathlib import Path
+import rasterio
+from scipy.ndimage import zoom
+from typing import Optional, Tuple, Dict, Any
+
+# PyBullet import with fallback
+try:
+    import pybullet as p
+    import pybullet_data
+    PYBULLET_AVAILABLE = True
+except ImportError:
+    PYBULLET_AVAILABLE = False
+    print("Warning: PyBullet not available. Using simplified physics mode.")
+
+
+class PyBulletTerrainEnv(gym.Env):
+    """
+    Physics-based hiking environment using PyBullet simulation.
+    
+    Features:
+        - Heightfield terrain from real DEM data
+        - Research-backed friction coefficients [1]
+        - Naismith's Rule energy model [2][3]
+        - Sparse reward structure (goal-only)
+        - Terrain-type based traversability
+    
+    The agent learns to find safe paths through environment physics alone,
+    not reward shaping - encouraging natural switchback discovery.
+    """
+    
+    metadata = {"render_modes": ["rgb_array", "human"]}
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # RESEARCH-BACKED FRICTION COEFFICIENTS [1][4]
+    # ═══════════════════════════════════════════════════════════════════════════
+    # From: Ziaei et al. (2017) shoe friction testing and geotechnical literature
+    TERRAIN_FRICTION = {
+        "trail": 0.75,      # Established path - highest grip [1]
+        "rock": 0.70,       # Dry solid rock - good grip [1]
+        "grass": 0.55,      # Vegetation - moderate grip
+        "forest": 0.50,     # Forest floor with debris
+        "scree": 0.35,      # Loose rock - near angle of repose [4]
+        "wet_rock": 0.40,   # Wet surface - reduced grip
+        "water": 0.0,       # Impassable
+    }
+    
+    # Energy multipliers per terrain type (effort to traverse)
+    TERRAIN_ENERGY_MULTIPLIER = {
+        "trail": 0.8,       # Easiest walking surface
+        "rock": 1.2,        # Careful foot placement needed
+        "grass": 1.0,       # Normal walking
+        "forest": 1.3,      # Obstacles and uneven ground
+        "scree": 2.5,       # Extremely exhausting [4]
+        "water": 100.0,     # Impassable
+    }
+    
+    # Map NLCD-like codes to terrain types (from vegetation_cost.tif)
+    VEGETATION_TO_TERRAIN = {
+        (0, 2.0): "trail",      # Very low cost = established path
+        (2.0, 3.0): "grass",    # Low cost = grass/meadow
+        (3.0, 5.0): "forest",   # Moderate = light forest
+        (5.0, 15.0): "forest",  # Higher = dense forest
+        (15.0, 50.0): "scree",  # High cost = difficult terrain
+        (50.0, 100.0): "rock",  # Very high = exposed rock
+        (100.0, float('inf')): "water",  # Impassable
+    }
+    
+    # Naismith's Rule: 1m vertical = 8m horizontal [2][3]
+    NAISMITH_RATIO = 8.0
+    
+    def __init__(
+        self,
+        processed_data_dir: str | Path = "data/processed",
+        raw_data_dir: str | Path = "data/raw",
+        max_steps: int = 10000,
+        goal_distance_meters: float = 500.0,
+        render_mode: Optional[str] = None,
+        curriculum_level: int = 0,
+        downsample_factor: int = 16,  # Reduce terrain resolution for PyBullet (16 = ~133x82 grid)
+    ):
+        super().__init__()
+        
+        self.processed_dir = Path(processed_data_dir)
+        self.raw_dir = Path(raw_data_dir)
+        self.max_steps = max_steps
+        self.goal_distance_meters = goal_distance_meters
+        self.render_mode = render_mode
+        self.curriculum_level = curriculum_level
+        self.downsample_factor = downsample_factor
+        
+        # Load terrain data
+        self._load_terrain()
+        
+        # Initialize PyBullet
+        self._setup_pybullet()
+        
+        # Agent state
+        self.agent_pos = np.zeros(3, dtype=np.float32)
+        self.agent_vel = np.zeros(3, dtype=np.float32)
+        self.stamina = 100.0
+        self.health = 100.0
+        self.step_count = 0
+        self.trajectory = []
+        self.goal = np.zeros(3, dtype=np.float32)
+        
+        # Progress tracking for exploration reward
+        self.best_distance_achieved = float('inf')
+        self.initial_distance = float('inf')
+        
+        # Heatmap accumulator for trajectory visualization
+        self.trajectory_heatmap = None
+        self.episode_heatmaps = []
+        
+        # Track curriculum successes
+        self.curriculum_successes = 0
+        self.curriculum_attempts = 0
+        
+        # Observation and action spaces
+        self._setup_spaces()
+    
+    def _load_terrain(self):
+        """Load DEM and terrain classification data."""
+        # Load elevation (DEM)
+        dem_path = self.raw_dir / "dem_st_helens.tif"
+        with rasterio.open(dem_path) as src:
+            full_elevation = src.read(1).astype(np.float32)
+            self.transform = src.transform
+            self.crs = src.crs
+            
+            # Handle geographic coordinates
+            if src.crs.to_epsg() == 4326:
+                latitude = 46.2  # Mt. St. Helens
+                lat_rad = np.radians(latitude)
+                meters_per_degree = np.cos(lat_rad) * 111320
+                self.cell_size = float(src.res[0]) * meters_per_degree
+            else:
+                self.cell_size = float(src.res[0])
+        
+        # Downsample for PyBullet performance
+        self.elevation = zoom(full_elevation, 1.0 / self.downsample_factor, order=1)
+        self.effective_cell_size = self.cell_size * self.downsample_factor
+        self.map_h, self.map_w = self.elevation.shape
+        
+        print(f"Terrain loaded: {self.map_h}x{self.map_w} @ {self.effective_cell_size:.1f}m/cell")
+        
+        # Load vegetation cost for terrain classification
+        veg_path = self.processed_dir / "vegetation_cost.tif"
+        if veg_path.exists():
+            with rasterio.open(veg_path) as src:
+                veg_cost = src.read(1).astype(np.float32)
+                self.vegetation_cost = zoom(veg_cost, 1.0 / self.downsample_factor, order=0)
+        else:
+            # Default to grass everywhere
+            self.vegetation_cost = np.full(self.elevation.shape, 2.0, dtype=np.float32)
+        
+        # Load trail coordinates if available
+        trail_path = self.processed_dir / "trail_coordinates.npy"
+        if trail_path.exists():
+            self.trail_coords = np.load(trail_path) / self.downsample_factor
+        else:
+            self.trail_coords = None
+    
+    def _setup_pybullet(self):
+        """Initialize PyBullet simulation with terrain heightfield."""
+        if not PYBULLET_AVAILABLE:
+            self.physics_client = None
+            return
+        
+        # Connect to PyBullet (direct mode for headless training)
+        self.physics_client = p.connect(p.DIRECT)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        p.setGravity(0, 0, -9.81)
+        
+        # Create heightfield terrain
+        # PyBullet expects row-major flattened array
+        terrain_data = self.elevation.flatten().astype(np.float32)
+        
+        # Normalize heights to avoid numerical issues
+        self.height_min = float(np.min(self.elevation))
+        self.height_max = float(np.max(self.elevation))
+        terrain_data_normalized = (terrain_data - self.height_min) / max(1.0, self.height_max - self.height_min)
+        
+        try:
+            terrain_shape = p.createCollisionShape(
+                p.GEOM_HEIGHTFIELD,
+                heightfieldData=terrain_data_normalized.tolist(),
+                numHeightfieldRows=self.map_h,
+                numHeightfieldColumns=self.map_w,
+                meshScale=[self.effective_cell_size, self.effective_cell_size, self.height_max - self.height_min],
+                heightfieldTextureScaling=1.0
+            )
+            
+            # Center heightfield at origin
+            self.terrain_id = p.createMultiBody(
+                baseMass=0,  # Static terrain
+                baseCollisionShapeIndex=terrain_shape,
+                basePosition=[
+                    self.map_w * self.effective_cell_size / 2,
+                    self.map_h * self.effective_cell_size / 2,
+                    (self.height_max + self.height_min) / 2
+                ]
+            )
+            
+            print("PyBullet heightfield terrain created successfully")
+            
+        except Exception as e:
+            print(f"Failed to create PyBullet heightfield: {e}")
+            print("Falling back to simplified physics mode")
+            self.physics_client = None
+            return
+        
+        # Create agent as a capsule (hiker)
+        agent_radius = 0.3  # 30cm radius
+        agent_height = 1.7  # 1.7m tall
+        agent_mass = 70.0   # 70 kg hiker
+        
+        agent_shape = p.createCollisionShape(p.GEOM_CAPSULE, radius=agent_radius, height=agent_height)
+        self.agent_id = p.createMultiBody(
+            baseMass=agent_mass,
+            baseCollisionShapeIndex=agent_shape,
+            basePosition=[0, 0, 0]
+        )
+    
+    def _setup_spaces(self):
+        """Define observation and action spaces."""
+        # Observation: local terrain + agent state + goal direction
+        self.view_radius = 10  # 10 cells in each direction = 21x21 grid
+        view_size = 2 * self.view_radius + 1
+        
+        self.observation_space = spaces.Dict({
+            # Local terrain heights (21x21 grid around agent)
+            "terrain_heights": spaces.Box(
+                low=-1000.0, high=5000.0,
+                shape=(view_size, view_size),
+                dtype=np.float32
+            ),
+            # Local terrain friction coefficients
+            "terrain_friction": spaces.Box(
+                low=0.0, high=1.0,
+                shape=(view_size, view_size),
+                dtype=np.float32
+            ),
+            # Agent physical state
+            "agent_state": spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(10,),  # [vx, vy, vz, stamina, health, roll, pitch, current_friction, slope, elevation]
+                dtype=np.float32
+            ),
+            # Goal bearing (unit vector, NOT distance)
+            "goal_bearing": spaces.Box(
+                low=-1.0, high=1.0,
+                shape=(2,),
+                dtype=np.float32
+            ),
+        })
+        
+        # Continuous action: desired movement direction (2D normalized)
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0,
+            shape=(2,),
+            dtype=np.float32
+        )
+    
+    def _get_terrain_type(self, row: int, col: int) -> str:
+        """Get terrain type from vegetation cost map."""
+        row = int(np.clip(row, 0, self.map_h - 1))
+        col = int(np.clip(col, 0, self.map_w - 1))
+        cost = self.vegetation_cost[row, col]
+        
+        for (low, high), terrain_type in self.VEGETATION_TO_TERRAIN.items():
+            if low <= cost < high:
+                return terrain_type
+        return "grass"  # Default
+    
+    def _get_friction(self, row: int, col: int) -> float:
+        """Get friction coefficient at position."""
+        terrain_type = self._get_terrain_type(row, col)
+        return self.TERRAIN_FRICTION.get(terrain_type, 0.5)
+    
+    def _get_slope(self, row: int, col: int) -> float:
+        """Calculate local slope in degrees."""
+        row = int(np.clip(row, 1, self.map_h - 2))
+        col = int(np.clip(col, 1, self.map_w - 2))
+        
+        dz_dy = (self.elevation[row + 1, col] - self.elevation[row - 1, col]) / (2 * self.effective_cell_size)
+        dz_dx = (self.elevation[row, col + 1] - self.elevation[row, col - 1]) / (2 * self.effective_cell_size)
+        
+        gradient = np.sqrt(dz_dx**2 + dz_dy**2)
+        slope_deg = np.degrees(np.arctan(gradient))
+        return float(slope_deg)
+    
+    def _compute_stamina_drain(
+        self,
+        prev_pos: np.ndarray,
+        new_pos: np.ndarray,
+        terrain_type: str
+    ) -> float:
+        """
+        Energy model based on Naismith's Rule [2][3].
+        
+        1 meter of vertical gain = 8 meters of horizontal walking in energy terms.
+        """
+        horizontal_dist = np.linalg.norm(new_pos[:2] - prev_pos[:2])
+        vertical_gain = max(0, new_pos[2] - prev_pos[2])
+        
+        # Naismith's 8:1 equivalence for climbing
+        equivalent_distance = horizontal_dist + (vertical_gain * self.NAISMITH_RATIO)
+        
+        # Base drain per equivalent meter
+        base_drain = 0.002
+        
+        # Terrain multiplier (harder terrain = more exhausting)
+        multiplier = self.TERRAIN_ENERGY_MULTIPLIER.get(terrain_type, 1.0)
+        
+        return equivalent_distance * base_drain * multiplier
+    
+    def _pos_to_grid(self, pos: np.ndarray) -> Tuple[int, int]:
+        """Convert world position to grid coordinates."""
+        col = int(pos[0] / self.effective_cell_size)
+        row = int(pos[1] / self.effective_cell_size)
+        return (
+            int(np.clip(row, 0, self.map_h - 1)),
+            int(np.clip(col, 0, self.map_w - 1))
+        )
+    
+    def _grid_to_pos(self, row: int, col: int) -> np.ndarray:
+        """Convert grid coordinates to world position."""
+        x = col * self.effective_cell_size
+        y = row * self.effective_cell_size
+        z = self.elevation[row, col]
+        return np.array([x, y, z], dtype=np.float32)
+    
+    def _get_observation(self) -> Dict[str, np.ndarray]:
+        """Build observation dictionary."""
+        row, col = self._pos_to_grid(self.agent_pos)
+        
+        # Extract local terrain patches
+        terrain_heights = np.zeros((2 * self.view_radius + 1, 2 * self.view_radius + 1), dtype=np.float32)
+        terrain_friction = np.zeros_like(terrain_heights)
+        
+        for dr in range(-self.view_radius, self.view_radius + 1):
+            for dc in range(-self.view_radius, self.view_radius + 1):
+                r = int(np.clip(row + dr, 0, self.map_h - 1))
+                c = int(np.clip(col + dc, 0, self.map_w - 1))
+                
+                terrain_heights[dr + self.view_radius, dc + self.view_radius] = self.elevation[r, c]
+                terrain_friction[dr + self.view_radius, dc + self.view_radius] = self._get_friction(r, c)
+        
+        # Agent state
+        current_friction = self._get_friction(row, col)
+        current_slope = self._get_slope(row, col)
+        
+        agent_state = np.array([
+            self.agent_vel[0],
+            self.agent_vel[1],
+            self.agent_vel[2],
+            self.stamina / 100.0,
+            self.health / 100.0,
+            0.0,  # roll (placeholder)
+            0.0,  # pitch (placeholder)
+            current_friction,
+            current_slope / 60.0,  # Normalized
+            self.agent_pos[2] / 3000.0,  # Normalized elevation
+        ], dtype=np.float32)
+        
+        # Goal bearing (unit vector, NOT distance - prevents reward hacking)
+        goal_direction = self.goal[:2] - self.agent_pos[:2]
+        goal_dist = np.linalg.norm(goal_direction)
+        if goal_dist > 0:
+            goal_bearing = goal_direction / goal_dist
+        else:
+            goal_bearing = np.zeros(2, dtype=np.float32)
+        
+        return {
+            "terrain_heights": terrain_heights,
+            "terrain_friction": terrain_friction,
+            "agent_state": agent_state,
+            "goal_bearing": goal_bearing.astype(np.float32),
+        }
+    
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        options: Optional[Dict[str, Any]] = None
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+        """Reset environment for new episode."""
+        super().reset(seed=seed)
+        
+        self.curriculum_attempts += 1
+        
+        # FIXED GOAL = SUMMIT, Agent starts at curriculum distance and walks UPHILL
+        if self.trail_coords is not None and len(self.trail_coords) >= 2:
+            # Find summit (highest elevation point on trail) - THIS IS ALWAYS THE GOAL
+            max_elevation = -np.inf
+            summit_idx = 0
+            
+            for i, point in enumerate(self.trail_coords):
+                r, c = int(point[0]), int(point[1])
+                if 0 <= r < self.map_h and 0 <= c < self.map_w:
+                    elev = self.elevation[r, c]
+                    if elev > max_elevation:
+                        max_elevation = elev
+                        summit_idx = i
+            
+            # GOAL is ALWAYS the summit (fixed)
+            summit_point = self.trail_coords[summit_idx]
+            self.goal = self._grid_to_pos(int(summit_point[0]), int(summit_point[1]))
+            
+            # Agent spawns at curriculum distance FROM summit (in meters)
+            target_distance_meters = self.goal_distance_meters
+            cumulative_dist_meters = 0.0
+            start_idx = 0  # Default to trailhead
+            
+            # Walk backwards from summit to find spawn point at target distance
+            for i in range(summit_idx - 1, -1, -1):
+                # Convert to world positions to get actual meters
+                prev_pos = self._grid_to_pos(int(self.trail_coords[i + 1][0]), int(self.trail_coords[i + 1][1]))
+                curr_pos = self._grid_to_pos(int(self.trail_coords[i][0]), int(self.trail_coords[i][1]))
+                segment_dist = np.linalg.norm(curr_pos[:2] - prev_pos[:2])  # Distance in meters
+                cumulative_dist_meters += segment_dist
+                
+                if cumulative_dist_meters >= target_distance_meters:
+                    start_idx = i
+                    break
+            
+            start_point = self.trail_coords[start_idx]
+            self.agent_pos = self._grid_to_pos(int(start_point[0]), int(start_point[1]))
+            
+        else:
+            # Fallback: random positions (should rarely happen)
+            start_row = self.np_random.integers(self.map_h // 4, 3 * self.map_h // 4)
+            start_col = self.np_random.integers(self.map_w // 4, 3 * self.map_w // 4)
+            self.agent_pos = self._grid_to_pos(start_row, start_col)
+            
+            goal_row = self.np_random.integers(self.map_h // 4, 3 * self.map_h // 4)
+            goal_col = self.np_random.integers(self.map_w // 4, 3 * self.map_w // 4)
+            self.goal = self._grid_to_pos(goal_row, goal_col)
+        
+        # Reset agent state
+        self.agent_vel = np.zeros(3, dtype=np.float32)
+        self.stamina = 100.0
+        self.health = 100.0
+        self.step_count = 0
+        self.trajectory = [self.agent_pos.copy()]
+        
+        # Initialize progress tracking for this episode
+        self.initial_distance = float(np.linalg.norm(self.agent_pos[:2] - self.goal[:2]))
+        self.best_distance_achieved = self.initial_distance
+        
+        # Initialize trajectory heatmap for this episode
+        self.trajectory_heatmap = np.zeros((self.map_h, self.map_w), dtype=np.float32)
+        start_row, start_col = self._pos_to_grid(self.agent_pos)
+        self.trajectory_heatmap[start_row, start_col] = 1
+        
+        # Update PyBullet agent position if available
+        if self.physics_client is not None:
+            try:
+                p.resetBasePositionAndOrientation(
+                    self.agent_id,
+                    self.agent_pos.tolist(),
+                    [0, 0, 0, 1]
+                )
+                p.resetBaseVelocity(self.agent_id, [0, 0, 0], [0, 0, 0])
+            except:
+                pass
+        
+        obs = self._get_observation()
+        info = {
+            "start_pos": self.agent_pos.copy(),
+            "goal_pos": self.goal.copy(),
+            "initial_distance": self.initial_distance,
+        }
+        
+        return obs, info
+    
+    def _apply_physics(self, action: np.ndarray) -> Tuple[np.ndarray, str]:
+        """Apply physics-based movement."""
+        prev_pos = self.agent_pos.copy()
+        row, col = self._pos_to_grid(self.agent_pos)
+        terrain_type = self._get_terrain_type(row, col)
+        friction = self._get_friction(row, col)
+        slope = self._get_slope(row, col)
+        
+        # Desired movement direction from action
+        direction = np.array([action[0], action[1], 0], dtype=np.float32)
+        dir_mag = np.linalg.norm(direction[:2])
+        if dir_mag > 1.0:
+            direction[:2] /= dir_mag
+        
+        # Base walking speed (m/s)
+        base_speed = 1.5  # Average hiking speed
+        
+        # Speed reduction from low stamina
+        stamina_factor = max(0.2, self.stamina / 100.0)
+        
+        # Speed reduction from steep slopes (going uphill)
+        slope_factor = max(0.3, 1.0 - slope / 60.0)
+        
+        # Effective speed
+        effective_speed = base_speed * stamina_factor * slope_factor
+        
+        # Apply movement
+        delta_time = 0.5  # Simulate 0.5 seconds per step
+        movement = direction[:2] * effective_speed * delta_time
+        
+        # SLIP DISABLED - mountaineers have proper gear
+        # Only penalize for truly dangerous cliffs (>70°) - actual death zone
+        if slope > 70:
+            # This is a cliff - instant death
+            self.health = 0
+            return movement, "cliff_fall"
+        
+        return movement, "normal"
+    
+    def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
+        """Execute one step in the environment."""
+        self.step_count += 1
+        prev_pos = self.agent_pos.copy()
+        
+        # Get current terrain info
+        row, col = self._pos_to_grid(self.agent_pos)
+        terrain_type = self._get_terrain_type(row, col)
+        
+        # Apply physics-based movement
+        movement, result = self._apply_physics(action)
+        
+        # Update position
+        self.agent_pos[0] += movement[0]
+        self.agent_pos[1] += movement[1]
+        
+        # Clamp to map bounds
+        self.agent_pos[0] = np.clip(self.agent_pos[0], 0, (self.map_w - 1) * self.effective_cell_size)
+        self.agent_pos[1] = np.clip(self.agent_pos[1], 0, (self.map_h - 1) * self.effective_cell_size)
+        
+        # Update elevation
+        new_row, new_col = self._pos_to_grid(self.agent_pos)
+        self.agent_pos[2] = self.elevation[new_row, new_col]
+        
+        # Update velocity (for observation)
+        self.agent_vel = (self.agent_pos - prev_pos) / 0.5  # 0.5s timestep
+        
+        # Compute stamina drain (Naismith-based)
+        new_terrain_type = self._get_terrain_type(new_row, new_col)
+        # STAMINA DISABLED - agent doesn't get exhausted
+        # stamina_drain = self._compute_stamina_drain(prev_pos, self.agent_pos, new_terrain_type)
+        # self.stamina = max(0.0, self.stamina - stamina_drain)
+        
+        # Record trajectory
+        self.trajectory.append(self.agent_pos.copy())
+        
+        # ═══════════════════════════════════════════════════════════════
+        # REWARD FUNCTION with progress exploration bonus
+        # ═══════════════════════════════════════════════════════════════
+        goal_dist = np.linalg.norm(self.agent_pos[:2] - self.goal[:2])
+        reached_goal = goal_dist < 5.0  # Within 5 meters
+        
+        reward = 0.0
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PROGRESS REWARD (fires ONCE per new closest distance)
+        # This prevents spiraling because agent can only earn this reward
+        # by getting closer than ever before - can't farm by oscillating
+        # ═══════════════════════════════════════════════════════════════
+        if goal_dist < self.best_distance_achieved:
+            # Reward proportional to progress made
+            progress = self.best_distance_achieved - goal_dist
+            reward += progress * 2.0  # 2 points per meter of NEW progress
+            self.best_distance_achieved = goal_dist
+        
+        # Update heatmap with current position
+        if self.trajectory_heatmap is not None:
+            self.trajectory_heatmap[new_row, new_col] += 1
+        
+        if reached_goal:
+            reward += 10000.0  # Simplified: no stamina bonus
+            self.curriculum_successes += 1
+        elif self.health <= 0:
+            reward -= 5000.0
+        # STAMINA DISABLED - no termination on exhaustion
+        
+        # Check termination (stamina disabled)
+        terminated = reached_goal or self.health <= 0
+        truncated = self.step_count >= self.max_steps
+        
+        if truncated and not terminated:
+            reward -= 500.0  # Reduced timeout penalty (was -1000)
+        
+        # Build observation
+        obs = self._get_observation()
+        
+        info = {
+            "result": result,
+            "terrain_type": new_terrain_type,
+            "stamina": self.stamina,
+            "health": self.health,
+            "goal_distance": goal_dist,
+            "reached_goal": reached_goal,
+            "position": self.agent_pos.copy(),
+            "best_distance": self.best_distance_achieved,
+            "progress_made": self.initial_distance - self.best_distance_achieved,
+            "trajectory": self.trajectory.copy() if terminated or truncated else None,
+            "heatmap": self.trajectory_heatmap.copy() if terminated or truncated else None,
+        }
+        
+        return obs, float(reward), bool(terminated), bool(truncated), info
+    
+    def render(self):
+        """Render the environment (placeholder)."""
+        if self.render_mode == "rgb_array":
+            # Return terrain visualization with agent position
+            vis = np.zeros((self.map_h, self.map_w, 3), dtype=np.uint8)
+            
+            # Elevation shading
+            elev_norm = (self.elevation - self.height_min) / max(1.0, self.height_max - self.height_min)
+            vis[:, :, 0] = (elev_norm * 200).astype(np.uint8)
+            vis[:, :, 1] = (elev_norm * 200).astype(np.uint8)
+            vis[:, :, 2] = (elev_norm * 200).astype(np.uint8)
+            
+            # Draw agent
+            row, col = self._pos_to_grid(self.agent_pos)
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    r, c = row + dr, col + dc
+                    if 0 <= r < self.map_h and 0 <= c < self.map_w:
+                        vis[r, c] = [255, 0, 0]
+            
+            # Draw goal
+            grow, gcol = self._pos_to_grid(self.goal)
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    r, c = grow + dr, gcol + dc
+                    if 0 <= r < self.map_h and 0 <= c < self.map_w:
+                        vis[r, c] = [0, 255, 0]
+            
+            return vis
+        
+        return None
+    
+    def save_heatmap(self, filepath: str, include_terrain: bool = True):
+        """
+        Save trajectory heatmap as an image.
+        
+        Args:
+            filepath: Path to save the image (e.g., 'outputs/heatmap_ep100.png')
+            include_terrain: Whether to overlay on terrain elevation
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import LinearSegmentedColormap
+        
+        if self.trajectory_heatmap is None:
+            print("No heatmap data available")
+            return
+        
+        fig, ax = plt.subplots(figsize=(12, 10))
+        
+        # Background: terrain elevation
+        if include_terrain:
+            elev_norm = (self.elevation - self.height_min) / max(1.0, self.height_max - self.height_min)
+            ax.imshow(elev_norm, cmap='terrain', origin='upper', alpha=0.7)
+        
+        # Overlay: trajectory heatmap (log scale for visibility)
+        heatmap_vis = np.log1p(self.trajectory_heatmap)  # log(1 + x) for better visualization
+        if heatmap_vis.max() > 0:
+            # Custom colormap: transparent -> yellow -> red
+            colors = [(0, 0, 0, 0), (1, 1, 0, 0.5), (1, 0, 0, 0.9)]
+            cmap = LinearSegmentedColormap.from_list('trajectory', colors)
+            ax.imshow(heatmap_vis, cmap=cmap, origin='upper')
+        
+        # Mark start position
+        if len(self.trajectory) > 0:
+            start = self.trajectory[0]
+            sr, sc = self._pos_to_grid(start)
+            ax.plot(sc, sr, 'go', markersize=15, markeredgecolor='white', 
+                   markeredgewidth=2, label='Start')
+        
+        # Mark goal position
+        gr, gc = self._pos_to_grid(self.goal)
+        ax.plot(gc, gr, 'b*', markersize=20, markeredgecolor='white',
+               markeredgewidth=2, label='Goal')
+        
+        # Mark current/final position
+        cr, cc = self._pos_to_grid(self.agent_pos)
+        ax.plot(cc, cr, 'r^', markersize=12, markeredgecolor='white',
+               markeredgewidth=2, label='Final Position')
+        
+        # Add legend and title
+        ax.legend(loc='upper right')
+        
+        progress = self.initial_distance - self.best_distance_achieved
+        title = f"Episode Trajectory Heatmap\n"
+        title += f"Progress: {progress:.1f}m / {self.initial_distance:.1f}m ({100*progress/max(1,self.initial_distance):.1f}%)"
+        ax.set_title(title)
+        
+        ax.set_xlabel("Column")
+        ax.set_ylabel("Row")
+        
+        plt.tight_layout()
+        plt.savefig(filepath, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Heatmap saved to: {filepath}")
+    
+    def close(self):
+        """Clean up PyBullet."""
+        if self.physics_client is not None:
+            try:
+                p.disconnect(self.physics_client)
+            except:
+                pass
+        self.physics_client = None
+
+
+# Curriculum levels - increase max_steps for uphill walking
+CURRICULUM_LEVELS = [
+    {"goal_distance": 10,    "max_steps": 500,   "required_successes": 20},   # Level 0: 50 steps/m
+    {"goal_distance": 25,    "max_steps": 1000,  "required_successes": 30},   # Level 1: 40 steps/m
+    {"goal_distance": 50,    "max_steps": 1500,  "required_successes": 50},   # Level 2: 30 steps/m
+    {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},  # Level 3: 25 steps/m
+    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 200},  # Level 4: 24 steps/m
+    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 500},  # Level 5: 24 steps/m
+]
+
+
+def make_env(curriculum_level: int = 0):
+    """Factory function to create environment."""
+    config = CURRICULUM_LEVELS[min(curriculum_level, len(CURRICULUM_LEVELS) - 1)]
+    
+    return PyBulletTerrainEnv(
+        goal_distance_meters=config["goal_distance"],
+        max_steps=config["max_steps"],
+        curriculum_level=curriculum_level,
+    )
+
+
+if __name__ == "__main__":
+    # Test environment
+    print("Testing PyBullet Terrain Environment...")
+    
+    env = make_env(curriculum_level=0)
+    obs, info = env.reset()
+    
+    print(f"Start position: {info['start_pos']}")
+    print(f"Goal position: {info['goal_pos']}")
+    print(f"Initial distance: {info['initial_distance']:.1f}m")
+    print(f"Observation shapes:")
+    for key, val in obs.items():
+        print(f"  {key}: {val.shape}")
+    
+    # Take a few random steps
+    total_reward = 0
+    for i in range(100):
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        
+        if i % 20 == 0:
+            print(f"Step {i}: reward={reward:.1f}, stamina={info['stamina']:.1f}, dist={info['goal_distance']:.1f}")
+        
+        if terminated or truncated:
+            print(f"Episode ended at step {i}: {info['result']}")
+            break
+    
+    print(f"Total reward: {total_reward:.1f}")
+    env.close()

@@ -167,3 +167,9 @@ dem_st_helens.tif
 data/processed/*
 
 outputs/
+
+test_spawn.py
+compare_algorithms.py
+debug_nav.py
+verify_spawn.py
+test_climb.py

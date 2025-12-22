@@ -7,9 +7,9 @@ A physics-based reinforcement learning system for generating safe hiking paths t
 ## Key Features
 
 - **PyBullet Physics Simulation**: Realistic terrain interaction with research-backed friction coefficients
-- **Sparse Reward Design**: Goal-only rewards force agent to learn from physics, not reward hacking
-- **Terrain-Aware Energy Model**: Naismith's Rule-based stamina system encourages gradual climbing
-- **SAC Training**: Soft Actor-Critic for continuous action spaces with curriculum learning
+- **Dense Progress Rewards**: Gradient-based rewards guide agent toward goals efficiently
+- **Research-Backed Safety Model**: Fall distance thresholds from mountaineering trauma research
+- **PPO Training**: Proximal Policy Optimization with 17-level curriculum (10m → 14.6km)
 - **A* Comparison**: Automated comparison between RL paths, A* paths, and actual hiking trails
 
 ---
@@ -91,6 +91,18 @@ Research-backed values from biomechanics and geotechnical literature:
 | Forest floor | 0.50 | [2] |
 | Scree/talus | 0.35 | [3] |
 
+### Fall Safety Thresholds
+
+Based on mountaineering trauma research [7][8]:
+
+| Slope Angle | Risk Level | Agent Behavior |
+|-------------|------------|----------------|
+| < 45° | Safe | Normal traversal |
+| 45-70° | Challenging | Reduced speed |
+| > 70° | **Fatal cliff** | Episode termination |
+
+Research shows falls >6-8m significantly increase fatality risk, with >30m being near 100% fatal [7]. Slopes exceeding 70° represent cliffs where any fall would exceed safe distances.
+
 ### Energy Model (Naismith-Based)
 
 Following Naismith's Rule [4] and Scarf's validation [5]:
@@ -118,17 +130,21 @@ The `compare_with_astar.py` tool generates side-by-side comparisons:
 
 ## Training Details
 
-**Algorithm**: SAC (Soft Actor-Critic) [6]
-- Better for continuous action spaces than PPO
-- Off-policy for sample efficiency
-- Entropy regularization for exploration
+**Algorithm**: PPO (Proximal Policy Optimization) [6]
+- Stable on-policy learning
+- Works well with curriculum learning
+- Dense progress rewards for gradient guidance
 
-**Curriculum Learning**:
-```python
-Level 0: 25m  @ 500 steps   → Level 1: 50m  @ 1000 steps
-Level 2: 100m @ 2000 steps  → Level 3: 250m @ 5000 steps
-Level 4: 500m @ 10000 steps → Level 5: 1000m @ 25000 steps
-```
+**Full Trail Curriculum** (14.6km, 1,397m elevation gain):
+
+| Levels | Distance Range | Max Steps |
+|--------|---------------|----------|
+| 0-6 | 10m → 50m | 500 → 1,500 |
+| 7-11 | 75m → 500m | 2,000 → 12,000 |
+| 12-14 | 1km → 5km | 25,000 → 120,000 |
+| 15-16 | 10km → 14.6km | 250,000 → 400,000 |
+
+Agent advances when achieving 60% success rate at each level.
 
 ---
 
@@ -144,9 +160,13 @@ Level 4: 500m @ 10000 steps → Level 5: 1000m @ 25000 steps
 
 5. Scarf, P.A. (2007). "Route choice in mountain navigation, Naismith's Rule, and the equivalence of distance and climb." *J. Operational Research Society*, 58(9), 1199-1205. DOI: [10.1057/palgrave.jors.2602249](https://doi.org/10.1057/palgrave.jors.2602249)
 
-6. Haarnoja, T. et al. (2018). "Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor." *ICML 2018*. [arXiv:1801.01290](https://arxiv.org/abs/1801.01290)
+6. Schulman, J. et al. (2017). "Proximal Policy Optimization Algorithms." [arXiv:1707.06347](https://arxiv.org/abs/1707.06347)
 
-7. Wellhausen, L. et al. (2019). "Where Should I Walk? Predicting Terrain Properties from Images via Self-Supervised Learning." *IEEE RA-L*. DOI: [10.1109/LRA.2019.2930266](https://doi.org/10.1109/LRA.2019.2930266)
+7. Dickinson, E. et al. (2022). "Epidemiology of mountaineering fall accidents." *Wilderness & Environmental Medicine*, 33(2), 158-165. DOI: [10.1016/j.wem.2022.01.004](https://doi.org/10.1016/j.wem.2022.01.004)
+
+8. Hohlrieder, M. et al. (2007). "Severity and predictors of injury in climbing falls." *High Altitude Medicine & Biology*, 8(1), 39-43. DOI: [10.1089/ham.2006.1048](https://doi.org/10.1089/ham.2006.1048)
+
+9. Wellhausen, L. et al. (2019). "Where Should I Walk? Predicting Terrain Properties from Images via Self-Supervised Learning." *IEEE RA-L*. DOI: [10.1109/LRA.2019.2930266](https://doi.org/10.1109/LRA.2019.2930266)
 
 ---
 

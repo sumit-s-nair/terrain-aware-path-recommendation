@@ -134,6 +134,15 @@ class PyBulletTerrainEnv(gym.Env):
         self.curriculum_successes = 0
         self.curriculum_attempts = 0
         
+        # Technique usage tracking
+        self.technique_counts = {
+            "walking": 0,
+            "steep_hiking": 0,
+            "climbing": 0,
+            "rappelling": 0,
+            "extreme": 0
+        }
+        
         # Observation and action spaces
         self._setup_spaces()
     
@@ -241,13 +250,16 @@ class PyBulletTerrainEnv(gym.Env):
         )
     
     def _setup_spaces(self):
-        """Define observation and action spaces."""
-        # Observation: local terrain + agent state + goal direction
-        self.view_radius = 10  # 10 cells in each direction = 21x21 grid
+        """Define observation and action spaces.
+        
+        Enhanced observation for better long-distance navigation.
+        """
+        # INCREASED view radius for better terrain awareness
+        self.view_radius = 15  # 15 cells in each direction = 31x31 grid (~370m view at 12.3m/cell)
         view_size = 2 * self.view_radius + 1
         
         self.observation_space = spaces.Dict({
-            # Local terrain heights (21x21 grid around agent)
+            # Local terrain heights (31x31 grid around agent)
             "terrain_heights": spaces.Box(
                 low=-1000.0, high=5000.0,
                 shape=(view_size, view_size),
@@ -259,16 +271,22 @@ class PyBulletTerrainEnv(gym.Env):
                 shape=(view_size, view_size),
                 dtype=np.float32
             ),
-            # Agent physical state
-            "agent_state": spaces.Box(
-                low=-np.inf, high=np.inf,
-                shape=(10,),  # [vx, vy, vz, stamina, health, roll, pitch, current_friction, slope, elevation]
+            # Local terrain slopes (NEW - helps agent see steep areas)
+            "terrain_slopes": spaces.Box(
+                low=0.0, high=90.0,
+                shape=(view_size, view_size),
                 dtype=np.float32
             ),
-            # Goal bearing (unit vector, NOT distance)
-            "goal_bearing": spaces.Box(
-                low=-1.0, high=1.0,
-                shape=(2,),
+            # Agent physical state (expanded)
+            "agent_state": spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(12,),  # Added 2 more: progress_ratio, steps_remaining_ratio
+                dtype=np.float32
+            ),
+            # Goal info: bearing + distance (NEW - critical for long distances!)
+            "goal_info": spaces.Box(
+                low=-np.inf, high=np.inf,
+                shape=(4,),  # [bearing_x, bearing_y, distance_normalized, elevation_diff]
                 dtype=np.float32
             ),
         })
@@ -350,24 +368,35 @@ class PyBulletTerrainEnv(gym.Env):
         return np.array([x, y, z], dtype=np.float32)
     
     def _get_observation(self) -> Dict[str, np.ndarray]:
-        """Build observation dictionary."""
+        """Build observation dictionary with enhanced information."""
         row, col = self._pos_to_grid(self.agent_pos)
+        view_size = 2 * self.view_radius + 1
         
-        # Extract local terrain patches
-        terrain_heights = np.zeros((2 * self.view_radius + 1, 2 * self.view_radius + 1), dtype=np.float32)
+        # Extract local terrain patches (heights, friction, AND slopes)
+        terrain_heights = np.zeros((view_size, view_size), dtype=np.float32)
         terrain_friction = np.zeros_like(terrain_heights)
+        terrain_slopes = np.zeros_like(terrain_heights)
         
         for dr in range(-self.view_radius, self.view_radius + 1):
             for dc in range(-self.view_radius, self.view_radius + 1):
                 r = int(np.clip(row + dr, 0, self.map_h - 1))
                 c = int(np.clip(col + dc, 0, self.map_w - 1))
                 
-                terrain_heights[dr + self.view_radius, dc + self.view_radius] = self.elevation[r, c]
-                terrain_friction[dr + self.view_radius, dc + self.view_radius] = self._get_friction(r, c)
+                idx_r = dr + self.view_radius
+                idx_c = dc + self.view_radius
+                terrain_heights[idx_r, idx_c] = self.elevation[r, c]
+                terrain_friction[idx_r, idx_c] = self._get_friction(r, c)
+                terrain_slopes[idx_r, idx_c] = self._get_slope(r, c)
         
-        # Agent state
+        # Agent state (expanded with progress info)
         current_friction = self._get_friction(row, col)
         current_slope = self._get_slope(row, col)
+        
+        # Progress ratio: how much of initial distance have we covered?
+        progress_ratio = 1.0 - (self.best_distance_achieved / max(1.0, self.initial_distance))
+        
+        # Steps remaining ratio: how many steps left before timeout?
+        steps_remaining_ratio = 1.0 - (self.step_count / max(1, self.max_steps))
         
         agent_state = np.array([
             self.agent_vel[0],
@@ -380,21 +409,38 @@ class PyBulletTerrainEnv(gym.Env):
             current_friction,
             current_slope / 60.0,  # Normalized
             self.agent_pos[2] / 3000.0,  # Normalized elevation
+            progress_ratio,  # NEW: how much progress made
+            steps_remaining_ratio,  # NEW: urgency signal
         ], dtype=np.float32)
         
-        # Goal bearing (unit vector, NOT distance - prevents reward hacking)
+        # Goal info: bearing + distance + elevation difference
         goal_direction = self.goal[:2] - self.agent_pos[:2]
         goal_dist = np.linalg.norm(goal_direction)
+        
         if goal_dist > 0:
             goal_bearing = goal_direction / goal_dist
         else:
             goal_bearing = np.zeros(2, dtype=np.float32)
         
+        # Normalize distance by curriculum goal distance for consistency across levels
+        distance_normalized = goal_dist / max(1.0, self.goal_distance_meters)
+        
+        # Elevation difference (positive = uphill to goal)
+        elevation_diff = (self.goal[2] - self.agent_pos[2]) / 1000.0  # Normalized by 1km
+        
+        goal_info = np.array([
+            goal_bearing[0],
+            goal_bearing[1],
+            distance_normalized,  # CRITICAL: agent now knows how far!
+            elevation_diff,  # Agent knows if goal is up or down
+        ], dtype=np.float32)
+        
         return {
             "terrain_heights": terrain_heights,
             "terrain_friction": terrain_friction,
+            "terrain_slopes": terrain_slopes,
             "agent_state": agent_state,
-            "goal_bearing": goal_bearing.astype(np.float32),
+            "goal_info": goal_info,
         }
     
     def reset(
@@ -462,6 +508,15 @@ class PyBulletTerrainEnv(gym.Env):
         self.step_count = 0
         self.trajectory = [self.agent_pos.copy()]
         
+        # Reset technique tracking for new episode
+        self.technique_counts = {
+            "walking": 0,
+            "steep_hiking": 0,
+            "climbing": 0,
+            "rappelling": 0,
+            "extreme": 0
+        }
+        
         # Initialize progress tracking for this episode
         self.initial_distance = float(np.linalg.norm(self.agent_pos[:2] - self.goal[:2]))
         self.best_distance_achieved = self.initial_distance
@@ -492,12 +547,21 @@ class PyBulletTerrainEnv(gym.Env):
         
         return obs, info
     
-    def _apply_physics(self, action: np.ndarray) -> Tuple[np.ndarray, str]:
-        """Apply physics-based movement."""
-        prev_pos = self.agent_pos.copy()
+    def _apply_physics(self, action: np.ndarray) -> Tuple[np.ndarray, str, float]:
+        """
+        Apply physics-based movement with slope-dependent techniques.
+        
+        Returns:
+            movement: 2D movement vector
+            technique: Name of traversal technique used
+            reward_multiplier: Multiplier for progress rewards (lower for harder techniques)
+        
+        Technique speed factors based on mountaineering research:
+        - Normal walking: ~5 km/h horizontal, ~300 m/h vertical (Naismith's Rule)
+        - Technical climbing: ~185 m/h vertical (23.4m in 7:36 min, outdoor 5c route)
+        - Mountaineering estimate: 200-300 vertical m/h for moderate terrain
+        """
         row, col = self._pos_to_grid(self.agent_pos)
-        terrain_type = self._get_terrain_type(row, col)
-        friction = self._get_friction(row, col)
         slope = self._get_slope(row, col)
         
         # Desired movement direction from action
@@ -506,30 +570,58 @@ class PyBulletTerrainEnv(gym.Env):
         if dir_mag > 1.0:
             direction[:2] /= dir_mag
         
-        # Base walking speed (m/s)
-        base_speed = 1.5  # Average hiking speed
+        # Determine if going uphill or downhill based on gradient
+        dz_dy = (self.elevation[min(row + 1, self.map_h - 1), col] - 
+                 self.elevation[max(row - 1, 0), col]) / (2 * self.effective_cell_size)
+        dz_dx = (self.elevation[row, min(col + 1, self.map_w - 1)] - 
+                 self.elevation[row, max(col - 1, 0)]) / (2 * self.effective_cell_size)
+        gradient = np.array([dz_dx, dz_dy])
         
-        # Speed reduction from low stamina
-        stamina_factor = max(0.2, self.stamina / 100.0)
+        # Dot product: positive = uphill, negative = downhill
+        going_uphill = np.dot(direction[:2], gradient) > 0
         
-        # Speed reduction from steep slopes (going uphill)
-        slope_factor = max(0.3, 1.0 - slope / 60.0)
+        # Base walking speed (m/s) - average hiking pace
+        base_speed = 1.5
+        
+        # Determine technique and speed factor based on slope
+        # REWARD MULTIPLIERS INCREASED to encourage reaching steep summits
+        if slope <= 30:
+            # Normal walking - easy terrain
+            technique = "walking"
+            speed_factor = 1.0
+            reward_multiplier = 1.0
+        elif slope <= 45:
+            # Steep hiking - challenging but no technical gear needed
+            technique = "steep_hiking"
+            speed_factor = 0.6
+            reward_multiplier = 0.9  # Increased from 0.8
+        elif slope <= 60:
+            # Technical terrain - climbing gear helpful
+            technique = "climbing" if going_uphill else "rappelling"
+            speed_factor = 0.3
+            reward_multiplier = 0.8  # Increased from 0.5 - summit is in this range!
+        elif slope <= 75:
+            # Very technical - requires climbing/rappelling gear
+            technique = "climbing" if going_uphill else "rappelling"
+            speed_factor = 0.15
+            reward_multiplier = 0.6  # Increased from 0.3
+        else:
+            # Extreme terrain (75-90°) - barely traversable
+            technique = "extreme"
+            speed_factor = 0.05
+            reward_multiplier = 0.4  # Increased from 0.1
+        
+        # Track technique usage
+        self.technique_counts[technique] += 1
         
         # Effective speed
-        effective_speed = base_speed * stamina_factor * slope_factor
+        effective_speed = base_speed * speed_factor
         
         # Apply movement
         delta_time = 0.5  # Simulate 0.5 seconds per step
         movement = direction[:2] * effective_speed * delta_time
         
-        # SLIP DISABLED - mountaineers have proper gear
-        # Only penalize for truly dangerous cliffs (>70°) - actual death zone
-        if slope > 70:
-            # This is a cliff - instant death
-            self.health = 0
-            return movement, "cliff_fall"
-        
-        return movement, "normal"
+        return movement, technique, reward_multiplier
     
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         """Execute one step in the environment."""
@@ -541,7 +633,7 @@ class PyBulletTerrainEnv(gym.Env):
         terrain_type = self._get_terrain_type(row, col)
         
         # Apply physics-based movement
-        movement, result = self._apply_physics(action)
+        movement, technique, reward_multiplier = self._apply_physics(action)
         
         # Update position
         self.agent_pos[0] += movement[0]
@@ -581,9 +673,19 @@ class PyBulletTerrainEnv(gym.Env):
         # by getting closer than ever before - can't farm by oscillating
         # ═══════════════════════════════════════════════════════════════
         if goal_dist < self.best_distance_achieved:
-            # INCREASED reward to create dense gradient (was 2.0)
+            # Progress reward scaled by technique difficulty
+            # Walking gets full reward, climbing/rappelling gets less (encourages easier routes)
             progress = self.best_distance_achieved - goal_dist
-            reward += progress * 100.0  # 100 points per meter of NEW progress
+            
+            # PROXIMITY BONUS: Increase reward when close to goal
+            # This helps agent push through steep summit terrain
+            proximity_bonus = 1.0
+            if goal_dist < 50:
+                proximity_bonus = 2.0  # Double reward in last 50m
+            if goal_dist < 25:
+                proximity_bonus = 3.0  # Triple reward in last 25m
+            
+            reward += progress * 100.0 * reward_multiplier * proximity_bonus
             self.best_distance_achieved = goal_dist
         
         # Update heatmap with current position
@@ -593,12 +695,10 @@ class PyBulletTerrainEnv(gym.Env):
         if reached_goal:
             reward += 1000.0  # Reduced from 10000 to match progress rewards better
             self.curriculum_successes += 1
-        elif self.health <= 0:
-            reward -= 500.0  # Reduced from 5000 to match new reward scale
-        # STAMINA DISABLED - no termination on exhaustion
+        # No health penalty - all terrain is traversable with appropriate technique
         
-        # Check termination (stamina disabled)
-        terminated = reached_goal or self.health <= 0
+        # Check termination - only goal or timeout
+        terminated = reached_goal
         truncated = self.step_count >= self.max_steps
         
         if truncated and not terminated:
@@ -608,7 +708,8 @@ class PyBulletTerrainEnv(gym.Env):
         obs = self._get_observation()
         
         info = {
-            "result": result,
+            "technique": technique,
+            "technique_counts": self.technique_counts.copy(),
             "terrain_type": new_terrain_type,
             "stamina": self.stamina,
             "health": self.health,
@@ -740,13 +841,15 @@ CURRICULUM_LEVELS = [
     {"goal_distance": 75,    "max_steps": 2000,  "required_successes": 80},    # Level 7: 75m
     {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},   # Level 8: 100m
     {"goal_distance": 150,   "max_steps": 4000,  "required_successes": 120},   # Level 9: 150m
-    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 150},   # Level 10: 250m
-    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 200},   # Level 11: 500m
-    {"goal_distance": 1000,  "max_steps": 25000, "required_successes": 300},   # Level 12: 1km
-    {"goal_distance": 2000,  "max_steps": 50000, "required_successes": 400},   # Level 13: 2km
-    {"goal_distance": 5000,  "max_steps": 120000,"required_successes": 500},   # Level 14: 5km
-    {"goal_distance": 10000, "max_steps": 250000,"required_successes": 750},   # Level 15: 10km
-    {"goal_distance": 15000, "max_steps": 400000,"required_successes": 1000},  # Level 16: 14.6km (full trail)
+    {"goal_distance": 200,   "max_steps": 5000,  "required_successes": 140},   # Level 10: 200m (NEW)
+    {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 150},   # Level 11: 250m
+    {"goal_distance": 350,   "max_steps": 8500,  "required_successes": 175},   # Level 12: 350m (NEW)
+    {"goal_distance": 500,   "max_steps": 12000, "required_successes": 200},   # Level 13: 500m
+    {"goal_distance": 1000,  "max_steps": 25000, "required_successes": 300},   # Level 14: 1km
+    {"goal_distance": 2000,  "max_steps": 50000, "required_successes": 400},   # Level 15: 2km
+    {"goal_distance": 5000,  "max_steps": 120000,"required_successes": 500},   # Level 16: 5km
+    {"goal_distance": 10000, "max_steps": 250000,"required_successes": 750},   # Level 17: 10km
+    {"goal_distance": 15000, "max_steps": 400000,"required_successes": 1000},  # Level 18: 14.6km (full trail)
 ]
 
 

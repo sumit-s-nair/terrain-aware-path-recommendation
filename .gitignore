@@ -173,3 +173,5 @@ compare_algorithms.py
 debug_nav.py
 verify_spawn.py
 test_climb.py
+analyze_summit.py
+validate_environment.py

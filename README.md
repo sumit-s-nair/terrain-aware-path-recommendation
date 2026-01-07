@@ -91,17 +91,24 @@ Research-backed values from biomechanics and geotechnical literature:
 | Forest floor | 0.50 | [2] |
 | Scree/talus | 0.35 | [3] |
 
-### Fall Safety Thresholds
+### Slope-Based Traversal Techniques
 
-Based on mountaineering trauma research [7][8]:
+The agent uses different techniques based on terrain steepness, with speed factors derived from mountaineering research [10]:
 
-| Slope Angle | Risk Level | Agent Behavior |
-|-------------|------------|----------------|
-| < 45° | Safe | Normal traversal |
-| 45-70° | Challenging | Reduced speed |
-| > 70° | **Fatal cliff** | Episode termination |
+| Slope Range | Technique | Speed Factor | Reward Multiplier |
+|-------------|-----------|--------------|-------------------|
+| 0-30° | Walking | 100% | 100% |
+| 30-45° | Steep Hiking | 60% | 80% |
+| 45-60° | Rock Climbing / Careful Descent | 30% | 50% |
+| 60-75° | Technical Climbing / Rappelling | 15% | 30% |
+| 75-90° | Extreme Climbing | 5% | 10% |
 
-Research shows falls >6-8m significantly increase fatality risk, with >30m being near 100% fatal [7]. Slopes exceeding 70° represent cliffs where any fall would exceed safe distances.
+**Research basis:**
+- Normal hiking: ~5 km/h horizontal, ~300 m/h vertical (Naismith's Rule [4])
+- Technical rock climbing: ~185 m/h vertical (23.4m in 7:36 min on 5c route) [10]
+- Mountaineering estimate: 200-300 vertical m/h for moderate terrain [10]
+
+Lower reward multipliers on steep terrain encourage finding easier routes when possible, but allow traversing any terrain when necessary.
 
 ### Energy Model (Naismith-Based)
 
@@ -167,6 +174,8 @@ Agent advances when achieving 60% success rate at each level.
 8. Hohlrieder, M. et al. (2007). "Severity and predictors of injury in climbing falls." *High Altitude Medicine & Biology*, 8(1), 39-43. DOI: [10.1089/ham.2006.1048](https://doi.org/10.1089/ham.2006.1048)
 
 9. Wellhausen, L. et al. (2019). "Where Should I Walk? Predicting Terrain Properties from Images via Self-Supervised Learning." *IEEE RA-L*. DOI: [10.1109/LRA.2019.2930266](https://doi.org/10.1109/LRA.2019.2930266)
+
+10. Watts, P.B. et al. (2000). "Metabolic response during sport rock climbing and the effects of active versus passive recovery." *Int. J. Sports Medicine*, 21(3), 185-190. See also: Draper, N. et al. (2009). "Self-selected and imposed speed climbing." *J. Sports Sciences*, 27(4), 391-401. DOI: [10.1080/02640410802603827](https://doi.org/10.1080/02640410802603827)
 
 ---
 

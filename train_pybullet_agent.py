@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 import numpy as np
+import torch
 from tqdm import tqdm
 
 # Ensure we can import local modules
@@ -295,6 +296,12 @@ def train(
     print(f"Total timesteps: {total_timesteps:,}")
     print(f"Curriculum starting level: {starting_level}")
     print(f"Checkpoint frequency: {checkpoint_freq:,}")
+    
+    # Check for GPU
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    print(f"Using device: {device.upper()}")
     print()
     
     # Create environment
@@ -322,6 +329,7 @@ def train(
             ent_coef=0.05,             # Higher entropy for exploration (BC+PPO setting)
             verbose=1,
             tensorboard_log=str(TENSORBOARD_DIR),
+            device=device,
         )
     
     # Setup callbacks

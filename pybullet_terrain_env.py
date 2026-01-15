@@ -594,22 +594,22 @@ class PyBulletTerrainEnv(gym.Env):
             # Steep hiking - challenging but no technical gear needed
             technique = "steep_hiking"
             speed_factor = 0.6
-            reward_multiplier = 0.9  # Increased from 0.8
+            reward_multiplier = 1.0  # Increased from 0.9 to encourage usage
         elif slope <= 60:
             # Technical terrain - climbing gear helpful
             technique = "climbing" if going_uphill else "rappelling"
             speed_factor = 0.3
-            reward_multiplier = 0.8  # Increased from 0.5 - summit is in this range!
+            reward_multiplier = 0.95  # Increased from 0.8
         elif slope <= 75:
             # Very technical - requires climbing/rappelling gear
             technique = "climbing" if going_uphill else "rappelling"
             speed_factor = 0.15
-            reward_multiplier = 0.6  # Increased from 0.3
+            reward_multiplier = 0.9  # Increased from 0.6
         else:
             # Extreme terrain (75-90°) - barely traversable
             technique = "extreme"
             speed_factor = 0.05
-            reward_multiplier = 0.4  # Increased from 0.1
+            reward_multiplier = 0.4  # Kept low for safety
         
         # Track technique usage
         self.technique_counts[technique] += 1
@@ -840,8 +840,8 @@ CURRICULUM_LEVELS = [
     {"goal_distance": 50,    "max_steps": 1500,  "required_successes": 60},    # Level 6: 50m
     {"goal_distance": 75,    "max_steps": 2000,  "required_successes": 80},    # Level 7: 75m
     {"goal_distance": 100,   "max_steps": 2500,  "required_successes": 100},   # Level 8: 100m
-    {"goal_distance": 150,   "max_steps": 4000,  "required_successes": 120},   # Level 9: 150m
-    {"goal_distance": 200,   "max_steps": 5000,  "required_successes": 140},   # Level 10: 200m (NEW)
+    {"goal_distance": 150,   "max_steps": 4500,  "required_successes": 120},   # Level 9: 150m (Increased steps)
+    {"goal_distance": 200,   "max_steps": 5500,  "required_successes": 140},   # Level 10: 200m (NEW) (Increased steps)
     {"goal_distance": 250,   "max_steps": 6000,  "required_successes": 150},   # Level 11: 250m
     {"goal_distance": 350,   "max_steps": 8500,  "required_successes": 175},   # Level 12: 350m (NEW)
     {"goal_distance": 500,   "max_steps": 12000, "required_successes": 200},   # Level 13: 500m

@@ -26,6 +26,55 @@ This project demonstrates that RL agents, trained with realistic physics constra
 
 ---
 
+## Methodology
+
+Our approach follows a four-stage pipeline that combines real-world terrain data with physics-based simulation and curriculum learning:
+
+### 1. Terrain Data Acquisition
+
+- **Digital Elevation Model (DEM)**: High-resolution elevation data processed to compute slope gradients at each cell
+- **Land Cover Classification**: Satellite-derived surface types (trail, rock, grass, forest, scree) mapped to friction coefficients
+- **GPX Trail Data**: Real hiking trail waypoints used for comparison and validation
+
+### 2. Physics-Based Environment Design
+
+We use **PyBullet** to simulate realistic agent-terrain interactions:
+
+- **Friction dynamics**: Surface-dependent coefficients affect movement speed and stability
+- **Slope penalties**: Steeper terrain reduces traversal speed following Naismith's Rule
+- **Fall risk modeling**: Based on mountaineering trauma research, fall probability increases with slope angle and unstable surfaces
+
+### 3. Reward Shaping Strategy
+
+The reward function balances multiple objectives:
+
+```
+R = R_progress + R_safety + R_efficiency + R_goal
+```
+
+| Component | Description |
+|-----------|-------------|
+| **R_progress** | Dense reward for reducing distance to goal (gradient-based) |
+| **R_safety** | Penalty for traversing high-risk terrain (steep slopes, loose surfaces) |
+| **R_efficiency** | Energy cost based on Naismith's 8:1 climb-to-distance ratio |
+| **R_goal** | Large bonus for reaching destination safely |
+
+### 4. Curriculum-Based Training
+
+The agent learns progressively through a **17-level curriculum**:
+
+```
+Level 0 (10m) → Level 6 (50m) → Level 11 (500m) → Level 16 (14.6km)
+```
+
+- **Early levels**: Learn basic navigation and terrain awareness
+- **Mid levels**: Develop switchback patterns for moderate slopes
+- **Final levels**: Apply learned strategies to full-length trails
+
+The agent advances when achieving a **60% success rate** at each level, ensuring robust skill acquisition before tackling longer distances.
+
+---
+
 ## Quick Start
 
 ```bash
